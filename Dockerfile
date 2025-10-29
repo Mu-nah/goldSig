@@ -1,22 +1,23 @@
-# ---------- Base ----------
+# Base image with Python 3.11
 FROM python:3.11-slim
 
-# ---------- Environment ----------
-WORKDIR /app
+# Set environment variables for caching transformers
+ENV HF_HOME=/tmp/.cache
+ENV TRANSFORMERS_CACHE=/tmp/.cache
 ENV PYTHONUNBUFFERED=1
 
-# ---------- System deps ----------
-RUN apt-get update && apt-get install -y git curl && rm -rf /var/lib/apt/lists/*
+# Set working directory
+WORKDIR /app
 
-# ---------- Install deps ----------
+# Copy requirements and install
 COPY requirements.txt .
-RUN pip install --upgrade pip && pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
 
-# ---------- Copy source ----------
+# Copy the bot code
 COPY . .
 
-# ---------- Port for Flask health check ----------
+# Expose port (match your Flask port)
 EXPOSE 10000
 
-# ---------- Entrypoint ----------
+# Start the bot
 CMD ["python", "goldStra.py"]
