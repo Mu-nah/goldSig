@@ -1,5 +1,5 @@
 pandas
-pandas-ta
+ta
 requests
 numpy
 torch
