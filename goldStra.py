@@ -1,31 +1,29 @@
-import os, time, requests, pandas as pd, numpy as np, feedparser, torch, threading, asyncio
+import os, time, requests, pandas as pd, numpy as np, torch, threading, asyncio
 from telegram import Bot
 from dotenv import load_dotenv
 from flask import Flask, jsonify
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
-from datetime import datetime, UTC
+from datetime import datetime, timedelta, timezone
 from urllib.parse import quote
+import feedparser
+from bs4 import BeautifulSoup
+from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 
 # ──────────────────────────────
-# ⚙️ CONFIG
+# CONFIG
 # ──────────────────────────────
 load_dotenv()
 SYMBOL = "XAU/USD"
 API_KEYS = os.getenv("TD_API_KEYS", "").split(",")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-
-RSI_PERIOD = 14
-BB_PERIOD = 20
-BB_STDDEV = 2
-MIN_PIP_DISTANCE = 1.0
 SLEEP_SECS = 1200  # 20 minutes
 
 bot = Bot(token=TELEGRAM_TOKEN)
 last_signal = None
 
 # ──────────────────────────────
-# 🧠 FINBERT SENTIMENT SETUP
+# FINBERT SENTIMENT SETUP (optional)
 # ──────────────────────────────
 os.environ["HF_HOME"] = "/tmp/.cache"
 os.environ["TRANSFORMERS_CACHE"] = "/tmp/.cache"
@@ -34,8 +32,10 @@ labels = ["Positive", "Negative", "Neutral"]
 finbert_tokenizer = AutoTokenizer.from_pretrained("yiyanghkust/finbert-tone")
 finbert_model = AutoModelForSequenceClassification.from_pretrained("yiyanghkust/finbert-tone")
 
+vader = SentimentIntensityAnalyzer()
+
 # ──────────────────────────────
-# DATA FETCH
+# FETCH DATA
 # ──────────────────────────────
 def fetch_data(interval, limit=100):
     for key in API_KEYS:
@@ -54,78 +54,61 @@ def fetch_data(interval, limit=100):
     return None
 
 # ──────────────────────────────
-# INDICATORS (RSI + Bollinger Bands)
+# SENTIMENT ANALYSIS
 # ──────────────────────────────
-def rsi(series, period=14):
-    delta = series.diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.rolling(period, min_periods=period).mean()
-    avg_loss = loss.rolling(period, min_periods=period).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    return rsi
-
-def bollinger_bands(series, period=20, std_dev=2):
-    sma = series.rolling(period).mean()
-    std = series.rolling(period).std()
-    upper = sma + std_dev * std
-    lower = sma - std_dev * std
-    return upper, sma, lower
-
-# ──────────────────────────────
-# STRATEGY
-# ──────────────────────────────
-def generate_signal(df_1h, df_1d):
-    df_1h["rsi"] = rsi(df_1h["close"], RSI_PERIOD)
-    df_1h["bb_upper"], df_1h["bb_mid"], df_1h["bb_lower"] = bollinger_bands(df_1h["close"], BB_PERIOD, BB_STDDEV)
-
-    df_1d["bb_upper"], _, df_1d["bb_lower"] = bollinger_bands(df_1d["close"], BB_PERIOD, BB_STDDEV)
-
-    last1h, last1d = df_1h.iloc[-1], df_1d.iloc[-1]
-    direction = "BUY" if last1h["close"] > last1h["open"] else "SELL"
-
-    trend = (direction == "BUY" and last1h["close"] > last1h["bb_mid"] + MIN_PIP_DISTANCE) or \
-            (direction == "SELL" and last1h["close"] < last1h["bb_mid"] - MIN_PIP_DISTANCE)
-    reversal = (direction == "BUY" and last1h["close"] < last1h["bb_mid"]) or \
-               (direction == "SELL" and last1h["close"] > last1h["bb_mid"])
-    confirm1d = (direction == "BUY" and last1d["close"] > last1d["open"]) or \
-                (direction == "SELL" and last1d["close"] < last1d["open"])
-    inside_bb1d = last1d["close"] < last1d["bb_upper"] and last1d["close"] > last1d["bb_lower"]
-
-    if (trend or reversal) and confirm1d and inside_bb1d:
-        return direction, last1h
-    return None, last1h
-
-# ──────────────────────────────
-# SENTIMENT
-# ──────────────────────────────
-def fetch_news(query="gold market", num_articles=10):
+def fetch_news(query, num_articles=20):
     rss_url = f"https://news.google.com/rss/search?q={quote(query)}"
     feed = feedparser.parse(rss_url)
-    return [entry.title for entry in feed.entries[:num_articles]]
+    now = datetime.now(timezone.utc)
+    six_hours_ago = now - timedelta(hours=6)
 
-def finbert_sentiment(text):
-    inputs = finbert_tokenizer(text, return_tensors="pt", truncation=True, max_length=512)
-    with torch.no_grad():
-        outputs = finbert_model(**inputs)
-    probs = torch.softmax(outputs.logits, dim=1).numpy()[0]
-    return dict(zip(labels, probs))
+    articles = []
+    for entry in feed.entries[:num_articles]:
+        try:
+            published = datetime(*entry.published_parsed[:6], tzinfo=timezone.utc)
+        except:
+            published = now
+        if published < six_hours_ago:
+            continue
 
-def analyze_sentiment_for_gold():
-    titles = fetch_news("gold market", 15)
+        link = entry.link
+        title = entry.title
+        content = fetch_article_content(link)
+
+        articles.append({"title": title, "link": link, "published": published, "content": content})
+
+    return articles
+
+def fetch_article_content(url):
+    try:
+        r = requests.get(url, timeout=10)
+        r.raise_for_status()
+        soup = BeautifulSoup(r.text, "html.parser")
+        paragraphs = soup.find_all("p")
+        return " ".join([p.get_text() for p in paragraphs])
+    except:
+        return ""
+
+def analyze_sentiment(text):
+    scores = vader.polarity_scores(text)
+    compound = scores['compound']
+    if compound > 0.05:
+        return "Positive", compound
+    elif compound < -0.05:
+        return "Negative", compound
+    else:
+        return "Neutral", compound
+
+def summarize_sentiments(articles):
     summary = {"Positive": 0, "Negative": 0, "Neutral": 0}
-    for title in titles:
-        scores = finbert_sentiment(title)
-        dominant = max(scores, key=scores.get)
-        summary[dominant] += 1
-    total = sum(summary.values())
-    pos_pct = (summary["Positive"]/total)*100 if total else 0
-    neg_pct = (summary["Negative"]/total)*100 if total else 0
-    return pos_pct, neg_pct
+    for a in articles:
+        sentiment, _ = analyze_sentiment(a["title"] + " " + a["content"])
+        summary[sentiment] += 1
+    total = sum(summary.values()) or 1
+    return {k: (v, v/total*100) for k,v in summary.items()}
 
 # ──────────────────────────────
-# TELEGRAM ALERT (async-safe)
+# TELEGRAM ALERT
 # ──────────────────────────────
 def send_alert(msg):
     try:
@@ -135,28 +118,52 @@ def send_alert(msg):
         print(f"⚠️ Telegram send failed: {e}")
 
 # ──────────────────────────────
-# BACKGROUND LOOP
+# STRATEGY LOOP
 # ──────────────────────────────
 def strategy_loop():
     global last_signal
     while True:
         df_1h = fetch_data("1h", 100)
         df_1d = fetch_data("1day", 50)
-        if df_1h is not None and df_1d is not None:
-            signal, last = generate_signal(df_1h, df_1d)
-            if signal and signal != last_signal:
-                pos, neg = analyze_sentiment_for_gold()
-                print(f"🧠 Sentiment → Pos: {pos:.1f}% | Neg: {neg:.1f}%")
-                if (signal == "BUY" and pos >= 30) or (signal == "SELL" and neg >= 30):
-                    msg = (
-                        f"📈 Gold Signal ({signal})\n"
-                        f"Time: {last['datetime']}\n"
-                        f"Close: ${last['close']:.2f}\n"
-                        f"RSI: {last['rsi']:.2f}\n"
-                        f"Sentiment 🟢 {pos:.1f}% 🔴 {neg:.1f}%"
-                    )
-                    send_alert(msg)
-                    last_signal = signal
+        if df_1h is None or df_1d is None:
+            print("⚠️ Could not fetch market data.")
+            time.sleep(SLEEP_SECS)
+            continue
+
+        # --- Price action signal ---
+        last1h = df_1h.iloc[-1]
+        last1d = df_1d.iloc[-1]
+        direction = "BUY" if last1h["close"] > last1h["open"] else "SELL"
+
+        if last_signal == direction:
+            print("📊 Duplicate signal. Skipping.")
+            time.sleep(SLEEP_SECS)
+            continue
+
+        # --- News sentiment confirmation ---
+        articles = []
+        queries = ["gold market", "gold price", "gold news"]
+        for q in queries:
+            articles.extend(fetch_news(q))
+        sentiment_summary = summarize_sentiments(articles)
+
+        print(f"🧠 Sentiment: {sentiment_summary}")
+
+        pos_pct = sentiment_summary["Positive"][1]
+        neg_pct = sentiment_summary["Negative"][1]
+
+        if (direction == "BUY" and pos_pct >= 30) or (direction == "SELL" and neg_pct >= 30):
+            msg = (
+                f"📈 Gold Signal ({direction})\n"
+                f"Time: {last1h['datetime']}\n"
+                f"Close: ${last1h['close']:.2f}\n"
+                f"Sentiment 🟢 {pos_pct:.1f}% 🔴 {neg_pct:.1f}%"
+            )
+            send_alert(msg)
+            last_signal = direction
+        else:
+            print("❌ Sentiment weak — signal ignored.")
+
         time.sleep(SLEEP_SECS)
 
 # ──────────────────────────────
@@ -170,9 +177,9 @@ def home():
 
 @app.route("/health")
 def health():
-    return jsonify({"status": "ok", "timestamp": datetime.now(UTC).isoformat()})
+    return {"status": "ok", "timestamp": datetime.now(timezone.utc).isoformat()}
 
-# Start bot in background thread
+# Start background thread
 threading.Thread(target=strategy_loop, daemon=True).start()
 
 if __name__ == "__main__":
