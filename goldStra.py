@@ -1,10 +1,10 @@
-import os, time, requests, pandas as pd, pandas_ta as ta, feedparser, numpy as np, torch
+import os, time, requests, pandas as pd, pandas_ta as ta, feedparser, numpy as np, torch, threading
 from telegram import Bot
 from dotenv import load_dotenv
-from bs4 import BeautifulSoup
+from flask import Flask
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
-from datetime import datetime, timedelta, UTC
+from datetime import datetime, UTC
 from urllib.parse import quote
 
 # ──────────────────────────────
@@ -94,6 +94,7 @@ def generate_signal(df_1h, df_1d):
 # 🧠 SENTIMENT ANALYSIS
 # ──────────────────────────────
 def fetch_news(query="gold price", num_articles=10):
+    from urllib.parse import quote
     rss_url = f"https://news.google.com/rss/search?q={quote(query)}"
     feed = feedparser.parse(rss_url)
     return [entry.title for entry in feed.entries[:num_articles]]
@@ -107,7 +108,6 @@ def finbert_sentiment(text):
 
 def analyze_sentiment_for_gold():
     titles = fetch_news("gold market", 15)
-    analyzer = SentimentIntensityAnalyzer()
     summary = {"Positive": 0, "Negative": 0, "Neutral": 0}
     for title in titles:
         scores = finbert_sentiment(title)
@@ -131,7 +131,7 @@ def send_alert(msg):
 # ──────────────────────────────
 # 🚀 MAIN LOOP
 # ──────────────────────────────
-def main():
+def run_bot():
     print("🚀 Gold Strategy Bot Started (Render Mode)...")
     last_signal = None
     while True:
@@ -161,5 +161,21 @@ def main():
             print("⚠️ Could not fetch data.")
         time.sleep(SLEEP_SECS)
 
+# ──────────────────────────────
+# 🌐 FLASK APP (for Render health checks)
+# ──────────────────────────────
+app = Flask(__name__)
+
+@app.route("/")
+def home():
+    return "🟢 Gold Strategy Bot Running!"
+
+@app.route("/health")
+def health():
+    return {"status": "ok", "timestamp": datetime.now(UTC).isoformat()}
+
 if __name__ == "__main__":
-    main()
+    # Run the bot in a background thread
+    threading.Thread(target=run_bot, daemon=True).start()
+    # Start Flask server for Render
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
