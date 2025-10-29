@@ -1,29 +1,24 @@
-# ──────────────────────────────
-# Use slim Python 3.11 base
-# ──────────────────────────────
+# Base image
 FROM python:3.11-slim
 
 # Set working directory
 WORKDIR /app
 
-# Copy requirements
+# Copy and install dependencies
 COPY requirements.txt .
+RUN pip install --upgrade pip \
+    && pip install --no-cache-dir -r requirements.txt
 
-# Upgrade pip first
-RUN pip install --upgrade pip
+# Set environment variables for HuggingFace cache
+ENV HF_HOME=/tmp/hf_cache
+ENV TRANSFORMERS_CACHE=/tmp/hf_cache
+ENV PYTHONUNBUFFERED=1
 
-# Install dependencies
-RUN pip install --no-cache-dir -r requirements.txt
-
-# Copy bot code
+# Copy your bot code
 COPY . .
 
-# Set environment variables for HF cache
-ENV HF_HOME=/tmp/.cache
-ENV TRANSFORMERS_CACHE=/tmp/.cache
+# Expose the port your Flask app will use
+EXPOSE 5000
 
-# Expose port (needed by Render for web services)
-EXPOSE 10000
-
-# Run bot
+# Default command
 CMD ["python", "goldStra.py"]
