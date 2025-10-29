@@ -1,5 +1,5 @@
 pandas
-https://github.com/twopirllc/pandas-ta/archive/refs/heads/master.zip
+pandas-ta==0.3.14b0
 requests
 numpy
 torch
