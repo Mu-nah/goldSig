@@ -1,12 +1,11 @@
 pandas
-ta
-requests
 numpy
+requests
+pandas_ta @ git+https://github.com/twopirllc/pandas-ta.git
+feedparser
 torch
 transformers
-python-telegram-bot==20.8
-beautifulsoup4
-feedparser
 vaderSentiment
+python-telegram-bot==13.15
 flask
 python-dotenv
