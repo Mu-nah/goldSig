@@ -1,23 +1,19 @@
-# Use a lightweight Python base image
-FROM python:3.12-slim
+# ---------- Base ----------
+FROM python:3.11-slim
 
-# Set working directory
+# ---------- Environment ----------
 WORKDIR /app
-
-# Copy requirements first (for caching)
-COPY requirements.txt .
-
-# Install dependencies
-RUN pip install --no-cache-dir -r requirements.txt
-
-# Copy project files
-COPY . .
-
-# Expose port for Flask health check
-EXPOSE 8080
-
-# Environment variable (for unbuffered logs)
 ENV PYTHONUNBUFFERED=1
 
-# Start both bot and health server
+# ---------- System deps ----------
+RUN apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/*
+
+# ---------- Install deps ----------
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# ---------- Copy source ----------
+COPY . .
+
+# ---------- Entrypoint ----------
 CMD ["python", "goldStra.py"]
