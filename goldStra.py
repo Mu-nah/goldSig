@@ -1,4 +1,4 @@
-import os, time, requests, pandas as pd, pandas_ta as ta, feedparser, numpy as np, torch, threading, asyncio
+import os, time, requests, pandas as pd, numpy as np, feedparser, torch, threading, asyncio
 from telegram import Bot
 from dotenv import load_dotenv
 from flask import Flask, jsonify
@@ -54,18 +54,33 @@ def fetch_data(interval, limit=100):
     return None
 
 # ──────────────────────────────
+# INDICATORS (RSI + Bollinger Bands)
+# ──────────────────────────────
+def rsi(series, period=14):
+    delta = series.diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.rolling(period, min_periods=period).mean()
+    avg_loss = loss.rolling(period, min_periods=period).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    return rsi
+
+def bollinger_bands(series, period=20, std_dev=2):
+    sma = series.rolling(period).mean()
+    std = series.rolling(period).std()
+    upper = sma + std_dev * std
+    lower = sma - std_dev * std
+    return upper, sma, lower
+
+# ──────────────────────────────
 # STRATEGY
 # ──────────────────────────────
 def generate_signal(df_1h, df_1d):
-    df_1h["rsi"] = ta.rsi(df_1h["close"], length=RSI_PERIOD)
-    bb_1h = ta.bbands(df_1h["close"], length=BB_PERIOD, std=BB_STDDEV)
-    df_1h["bb_mid"] = bb_1h["BBM_20_2.0"]
-    df_1h["bb_upper"] = bb_1h["BBU_20_2.0"]
-    df_1h["bb_lower"] = bb_1h["BBL_20_2.0"]
+    df_1h["rsi"] = rsi(df_1h["close"], RSI_PERIOD)
+    df_1h["bb_upper"], df_1h["bb_mid"], df_1h["bb_lower"] = bollinger_bands(df_1h["close"], BB_PERIOD, BB_STDDEV)
 
-    bb_1d = ta.bbands(df_1d["close"], length=BB_PERIOD, std=BB_STDDEV)
-    df_1d["bb_upper"] = bb_1d["BBU_20_2.0"]
-    df_1d["bb_lower"] = bb_1d["BBL_20_2.0"]
+    df_1d["bb_upper"], _, df_1d["bb_lower"] = bollinger_bands(df_1d["close"], BB_PERIOD, BB_STDDEV)
 
     last1h, last1d = df_1h.iloc[-1], df_1d.iloc[-1]
     direction = "BUY" if last1h["close"] > last1h["open"] else "SELL"
@@ -155,7 +170,7 @@ def home():
 
 @app.route("/health")
 def health():
-    return {"status": "ok", "timestamp": datetime.now(UTC).isoformat()}
+    return jsonify({"status": "ok", "timestamp": datetime.now(UTC).isoformat()})
 
 # Start bot in background thread
 threading.Thread(target=strategy_loop, daemon=True).start()
