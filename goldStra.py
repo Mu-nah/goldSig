@@ -1,47 +1,48 @@
-import os
-import time
-import requests
-import pandas as pd
-import numpy as np
-import feedparser
-import threading
-import asyncio
+import os, time, requests, pandas as pd, numpy as np, feedparser, torch, asyncio
 from telegram import Bot
-from flask import Flask, jsonify
+from dotenv import load_dotenv
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
-from datetime import datetime, timezone
+from datetime import datetime
 from urllib.parse import quote
 
 # ──────────────────────────────
-# CONFIG
+# ⚙️ CONFIG
 # ──────────────────────────────
+load_dotenv()
 SYMBOL = "XAU/USD"
 API_KEYS = os.getenv("TD_API_KEYS", "").split(",")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-SLEEP_SECS = 1200  # 20 min
+
+RSI_PERIOD = 14
+BB_PERIOD = 20
+BB_STDDEV = 2
+MIN_PIP_DISTANCE = 1.0
+SLEEP_SECS = 1200  # 20 minutes
 
 bot = Bot(token=TELEGRAM_TOKEN)
-last_signal = None
 
 # ──────────────────────────────
-# TRANSFORMERS (CPU-only)
+# 🧠 FINBERT SENTIMENT SETUP
 # ──────────────────────────────
 os.environ["HF_HOME"] = "/tmp/.cache"
-finbert_tokenizer = AutoTokenizer.from_pretrained("yiyanghkust/finbert-tone")
-finbert_model = AutoModelForSequenceClassification.from_pretrained(
-    "yiyanghkust/finbert-tone", device_map="cpu"
-)
+os.environ["TRANSFORMERS_CACHE"] = "/tmp/.cache"  # optional
 labels = ["Positive", "Negative", "Neutral"]
 
+finbert_tokenizer = AutoTokenizer.from_pretrained("yiyanghkust/finbert-tone")
+finbert_model = AutoModelForSequenceClassification.from_pretrained(
+    "yiyanghkust/finbert-tone"
+)
+finbert_model.eval()  # CPU-only inference
+
 # ──────────────────────────────
-# FETCH DATA
+# 🔄 DATA FETCH
 # ──────────────────────────────
 def fetch_data(interval, limit=100):
     base_url = "https://api.twelvedata.com/time_series"
     for key in API_KEYS:
+        url = f"{base_url}?symbol={SYMBOL}&interval={interval}&outputsize={limit}&apikey={key.strip()}"
         try:
-            url = f"{base_url}?symbol={SYMBOL}&interval={interval}&outputsize={limit}&apikey={key.strip()}"
             r = requests.get(url, timeout=15)
             if r.status_code == 200:
                 data = r.json()
@@ -52,11 +53,11 @@ def fetch_data(interval, limit=100):
                     df = df.astype({"open": float, "high": float, "low": float, "close": float})
                     return df
         except Exception as e:
-            continue
+            print(f"Error using key {key[:6]} -> {e}")
     return None
 
 # ──────────────────────────────
-# STRATEGY & INDICATORS
+# 📊 INDICATORS
 # ──────────────────────────────
 def rsi(series, period=14):
     delta = series.diff()
@@ -74,22 +75,31 @@ def bollinger_bands(series, period=20, std_dev=2):
     lower = sma - std_dev * std
     return upper, sma, lower
 
+# ──────────────────────────────
+# 📊 STRATEGY
+# ──────────────────────────────
 def generate_signal(df_1h, df_1d):
-    df_1h["rsi"] = rsi(df_1h["close"])
-    df_1h["bb_upper"], df_1h["bb_mid"], df_1h["bb_lower"] = bollinger_bands(df_1h["close"])
-    df_1d["bb_upper"], _, df_1d["bb_lower"] = bollinger_bands(df_1d["close"])
-    
+    df_1h["rsi"] = rsi(df_1h["close"], RSI_PERIOD)
+    df_1h["bb_upper"], df_1h["bb_mid"], df_1h["bb_lower"] = bollinger_bands(df_1h["close"], BB_PERIOD, BB_STDDEV)
+    df_1d["bb_upper"], _, df_1d["bb_lower"] = bollinger_bands(df_1d["close"], BB_PERIOD, BB_STDDEV)
+
     last1h, last1d = df_1h.iloc[-1], df_1d.iloc[-1]
     direction = "BUY" if last1h["close"] > last1h["open"] else "SELL"
-    trend = (direction=="BUY" and last1h["close"]>last1h["bb_mid"]) or (direction=="SELL" and last1h["close"]<last1h["bb_mid"])
-    confirm1d = (direction=="BUY" and last1d["close"]>last1d["open"]) or (direction=="SELL" and last1d["close"]<last1d["open"])
-    inside_bb1d = last1d["bb_lower"]<last1d["close"]<last1d["bb_upper"]
-    if trend and confirm1d and inside_bb1d:
+
+    trend = (direction == "BUY" and last1h["close"] > last1h["bb_mid"] + MIN_PIP_DISTANCE) or \
+            (direction == "SELL" and last1h["close"] < last1h["bb_mid"] - MIN_PIP_DISTANCE)
+    reversal = (direction == "BUY" and last1h["close"] < last1h["bb_mid"]) or \
+               (direction == "SELL" and last1h["close"] > last1h["bb_mid"])
+    confirm1d = (direction == "BUY" and last1d["close"] > last1d["open"]) or \
+                (direction == "SELL" and last1d["close"] < last1d["open"])
+    inside_bb1d = last1d["close"] < last1d["bb_upper"] and last1d["close"] > last1d["bb_lower"]
+
+    if (trend or reversal) and confirm1d and inside_bb1d:
         return direction, last1h
     return None, last1h
 
 # ──────────────────────────────
-# SENTIMENT
+# 🧠 SENTIMENT ANALYSIS
 # ──────────────────────────────
 def fetch_news(query="gold price", num_articles=10):
     rss_url = f"https://news.google.com/rss/search?q={quote(query)}"
@@ -100,35 +110,35 @@ def finbert_sentiment(text):
     inputs = finbert_tokenizer(text, return_tensors="pt", truncation=True, max_length=512)
     with torch.no_grad():
         outputs = finbert_model(**inputs)
-    probs = torch.softmax(outputs.logits, dim=1).numpy()[0]
+        probs = torch.softmax(outputs.logits, dim=1).numpy()[0]
     return dict(zip(labels, probs))
 
 def analyze_sentiment_for_gold():
     titles = fetch_news("gold market", 15)
-    summary = {"Positive":0,"Negative":0,"Neutral":0}
-    for t in titles:
-        scores = finbert_sentiment(t)
+    summary = {"Positive": 0, "Negative": 0, "Neutral": 0}
+    for title in titles:
+        scores = finbert_sentiment(title)
         dominant = max(scores, key=scores.get)
         summary[dominant] += 1
-    total = sum(summary.values()) or 1
-    pos_pct = (summary["Positive"]/total)*100
-    neg_pct = (summary["Negative"]/total)*100
+    total = sum(summary.values())
+    pos_pct = (summary["Positive"]/total)*100 if total else 0
+    neg_pct = (summary["Negative"]/total)*100 if total else 0
     return pos_pct, neg_pct
 
 # ──────────────────────────────
-# TELEGRAM ALERT
+# 📬 TELEGRAM ALERT
 # ──────────────────────────────
 def send_alert(msg):
     try:
         asyncio.run(bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=msg))
-    except:
-        pass
+    except Exception as e:
+        print(f"Telegram send failed: {e}")
 
 # ──────────────────────────────
-# STRATEGY LOOP
+# 🚀 MAIN LOOP
 # ──────────────────────────────
-def strategy_loop():
-    global last_signal
+def main():
+    last_signal = None
     while True:
         df_1h = fetch_data("1h", 100)
         df_1d = fetch_data("1day", 50)
@@ -136,28 +146,17 @@ def strategy_loop():
             signal, last = generate_signal(df_1h, df_1d)
             if signal and signal != last_signal:
                 pos, neg = analyze_sentiment_for_gold()
-                if (signal=="BUY" and pos>=30) or (signal=="SELL" and neg>=30):
-                    msg = f"📈 Gold Signal ({signal})\nTime: {last['datetime']}\nClose: ${last['close']:.2f}\nSentiment: 🟢{pos:.1f}% 🔴{neg:.1f}%"
+                if (signal == "BUY" and pos >= 30) or (signal == "SELL" and neg >= 30):
+                    msg = (
+                        f"📈 Gold Signal ({signal})\n"
+                        f"Time: {last['datetime']}\n"
+                        f"Close: ${last['close']:.2f}\n"
+                        f"RSI: {last['rsi']:.2f}\n"
+                        f"Sentiment → 🟢 {pos:.1f}% | 🔴 {neg:.1f}%"
+                    )
                     send_alert(msg)
                     last_signal = signal
         time.sleep(SLEEP_SECS)
 
-# ──────────────────────────────
-# FLASK APP
-# ──────────────────────────────
-app = Flask(__name__)
-
-@app.route("/")
-def home():
-    return "🟢 Gold Strategy Bot Running!"
-
-@app.route("/health")
-def health():
-    return {"status":"ok","timestamp":datetime.now(timezone.utc).isoformat()}
-
-# start background thread
-threading.Thread(target=strategy_loop, daemon=True).start()
-
-if __name__=="__main__":
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host="0.0.0.0", port=port)
+if __name__ == "__main__":
+    main()
