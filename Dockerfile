@@ -13,11 +13,11 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy project files
 COPY . .
 
-# Expose port (Render sometimes expects it)
+# Expose port for Flask health check
 EXPOSE 8080
 
-# Set environment variable (helps some platforms)
+# Environment variable (for unbuffered logs)
 ENV PYTHONUNBUFFERED=1
 
-# Default command
+# Start both bot and health server
 CMD ["python", "goldStra.py"]
