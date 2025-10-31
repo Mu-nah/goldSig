@@ -1,4 +1,4 @@
-import os, time, requests, pandas as pd, numpy as np, feedparser, torch, asyncio, threading, logging
+import os, time, requests, pandas as pd, numpy as np, feedparser, torch, asyncio, threading, logging, sys
 from flask import Flask, jsonify
 from telegram import Bot
 from dotenv import load_dotenv
@@ -22,8 +22,14 @@ SLEEP_SECS = 1200  # 20 minutes
 
 bot = Bot(token=TELEGRAM_TOKEN)
 
-# Only show warnings and errors in logs
-logging.basicConfig(level=logging.WARNING, format="%(asctime)s [%(levelname)s] %(message)s")
+# ──────────────────────────────
+# 🧹 Suppress all noisy logs/output
+# ──────────────────────────────
+logging.basicConfig(level=logging.ERROR)
+log = logging.getLogger('werkzeug')
+log.setLevel(logging.ERROR)
+sys.stdout = open(os.devnull, 'w')
+sys.stderr = open(os.devnull, 'w')
 
 # ──────────────────────────────
 # 🧠 FINBERT SENTIMENT
@@ -31,15 +37,10 @@ logging.basicConfig(level=logging.WARNING, format="%(asctime)s [%(levelname)s] %
 os.environ["HF_HOME"] = "/tmp/.cache"
 os.environ["TRANSFORMERS_CACHE"] = "/tmp/.cache"
 labels = ["Positive", "Negative", "Neutral"]
-finbert_tokenizer, finbert_model = None, None
 
-def load_finbert():
-    global finbert_tokenizer, finbert_model
-    if finbert_model is None or finbert_tokenizer is None:
-        logging.warning("Loading FinBERT model...")
-        finbert_tokenizer = AutoTokenizer.from_pretrained("yiyanghkust/finbert-tone")
-        finbert_model = AutoModelForSequenceClassification.from_pretrained("yiyanghkust/finbert-tone")
-        logging.warning("FinBERT loaded.")
+# Load model once at startup (prevents memory spike)
+finbert_tokenizer = AutoTokenizer.from_pretrained("yiyanghkust/finbert-tone")
+finbert_model = AutoModelForSequenceClassification.from_pretrained("yiyanghkust/finbert-tone")
 
 # ──────────────────────────────
 # 🔄 DATA FETCH
@@ -56,8 +57,8 @@ def fetch_data(interval, limit=100):
                 df = df.sort_values("datetime")
                 df = df.astype({"open": float, "high": float, "low": float, "close": float})
                 return df
-        except Exception as e:
-            logging.error(f"API error {key[:6]}: {e}")
+        except:
+            pass
     return None
 
 # ──────────────────────────────
@@ -106,12 +107,10 @@ def fetch_news(query="gold market", num_articles=10):
     try:
         feed = feedparser.parse(f"https://news.google.com/rss/search?q={quote(query)}")
         return [entry.title for entry in feed.entries[:num_articles]]
-    except Exception as e:
-        logging.error(f"News fetch error: {e}")
+    except:
         return []
 
 def finbert_sentiment(text):
-    load_finbert()
     inputs = finbert_tokenizer(text, return_tensors="pt", truncation=True, max_length=512)
     with torch.no_grad():
         outputs = finbert_model(**inputs)
@@ -135,11 +134,14 @@ def analyze_sentiment_for_gold():
 async def send_alert(msg):
     try:
         await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=msg)
-    except Exception as e:
-        logging.error(f"Telegram error: {e}")
+    except:
+        pass
 
 def send_alert_sync(msg):
-    asyncio.run(send_alert(msg))
+    try:
+        asyncio.run(send_alert(msg))
+    except:
+        pass
 
 # ──────────────────────────────
 # 🖥 FLASK + BACKGROUND LOOP
@@ -149,7 +151,7 @@ last_signal = None
 
 @app.route("/")
 def home():
-    return jsonify({"status": "running", "symbol": SYMBOL, "last_signal": last_signal})
+    return "OK", 200  # small response for cron-job.org
 
 def background_loop():
     global last_signal
@@ -173,8 +175,7 @@ def background_loop():
                     send_alert_sync(msg)
                     last_signal = signal
             time.sleep(SLEEP_SECS)
-        except Exception as e:
-            logging.error(f"Loop error: {e}")
+        except:
             time.sleep(SLEEP_SECS)
 
 if __name__ == "__main__":
