@@ -18,7 +18,7 @@ RSI_PERIOD = 14
 BB_PERIOD = 20
 BB_STDDEV = 2
 MIN_PIP_DISTANCE = 1.0
-SLEEP_SECS = 1800  # 30 minutes
+SLEEP_SECS = 900  # 15 minutes
 
 bot = Bot(token=TELEGRAM_TOKEN)
 
@@ -140,7 +140,7 @@ def main():
             signal, last = generate_signal(df_1h, df_1d)
             if signal and signal != last_signal:
                 pos, neg = analyze_sentiment_for_gold()
-                if (signal == "BUY" and pos >= 30) or (signal == "SELL" and neg >= 30):
+                if (signal == "BUY" and pos >= 50) or (signal == "SELL" and neg >= 50):
                     msg = (
                         f"📈 Gold Signal Confirmed ({signal})\n"
                         f"Time: {last['datetime']}\n"
