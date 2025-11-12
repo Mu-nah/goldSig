@@ -123,10 +123,17 @@ def analyze_sentiment_for_gold():
     return pos_pct, neg_pct
 
 # ──────────────────────────────
-# TELEGRAM ALERT
+# TELEGRAM ALERT (fixed async issue)
 # ──────────────────────────────
 def send_alert(msg):
-    asyncio.run(bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=msg))
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_closed():
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+        loop.run_until_complete(bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=msg))
+    except Exception as e:
+        print(f"⚠️ Telegram send failed: {e}")
 
 # ──────────────────────────────
 # MAIN LOOP
