@@ -19,4 +19,4 @@ COPY . .
 EXPOSE 8080
 
 # Run the app
-CMD ["python", "app.py"]
+CMD ["python", "goldStra.py"]
