@@ -4,6 +4,8 @@ from dotenv import load_dotenv
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
 from datetime import datetime, timedelta, timezone
 from urllib.parse import quote
+from flask import Flask
+import threading
 
 # ──────────────────────────────
 # CONFIG
@@ -95,7 +97,7 @@ def generate_signal(df_1h, df_1d):
     inside_bb1d = last1d["close"] < last1d["bb_upper"] and last1d["close"] > last1d["bb_lower"]
 
     # ──────────────────────────────
-    # 🔥 NEW: RSI FILTER (BUY > 55, SELL < 45)
+    # 🔥 RSI FILTER (BUY > 55, SELL < 45)
     # ──────────────────────────────
     if direction == "BUY" and last1h["rsi"] <= 55:
         return None, last1h
@@ -136,7 +138,7 @@ def analyze_sentiment_for_gold():
     return pos_pct, neg_pct
 
 # ──────────────────────────────
-# TELEGRAM ALERT (async-safe)
+# TELEGRAM ALERT
 # ──────────────────────────────
 def send_alert(msg):
     try:
@@ -168,7 +170,6 @@ def main():
             signal, last = generate_signal(df_1h, df_1d)
             if signal:
                 pos, neg = analyze_sentiment_for_gold()
-                # check duplicates only for normal signals
                 if ((signal != last_signal) and
                     ((signal == "BUY" and pos >= 50) or (signal == "SELL" and neg >= 50))):
                     msg = (
@@ -202,5 +203,16 @@ def main():
 
         time.sleep(SLEEP_SECS)
 
+# ──────────────────────────────
+# FLASK WRAPPER FOR RAILWAY
+# ──────────────────────────────
+app = Flask(__name__)
+threading.Thread(target=main, daemon=True).start()
+
+@app.route("/")
+def health():
+    return "Gold Bot running ✅", 200
+
 if __name__ == "__main__":
-    main()
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host="0.0.0.0", port=port)
