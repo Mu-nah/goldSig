@@ -85,14 +85,27 @@ def generate_signal(df_1h, df_1d):
 
     trend = (direction == "BUY" and last1h["close"] > last1h["bb_mid"] + MIN_PIP_DISTANCE) or \
             (direction == "SELL" and last1h["close"] < last1h["bb_mid"] - MIN_PIP_DISTANCE)
+
     reversal = (direction == "BUY" and last1h["close"] < last1h["bb_mid"]) or \
                (direction == "SELL" and last1h["close"] > last1h["bb_mid"])
+
     confirm1d = (direction == "BUY" and last1d["close"] > last1d["open"]) or \
                 (direction == "SELL" and last1d["close"] < last1d["open"])
+
     inside_bb1d = last1d["close"] < last1d["bb_upper"] and last1d["close"] > last1d["bb_lower"]
+
+    # ──────────────────────────────
+    # 🔥 NEW: RSI FILTER (BUY > 55, SELL < 45)
+    # ──────────────────────────────
+    if direction == "BUY" and last1h["rsi"] <= 55:
+        return None, last1h
+    if direction == "SELL" and last1h["rsi"] >= 45:
+        return None, last1h
+    # ──────────────────────────────
 
     if (trend or reversal) and confirm1d and inside_bb1d:
         return direction, last1h
+
     return None, last1h
 
 # ──────────────────────────────
@@ -171,7 +184,6 @@ def main():
         # ────────── Forced 1AM WAT alert ──────────
         if now_wat.hour == 1 and now_wat.weekday() < 5:
             if last_forced_alert_date != now_wat.date():
-                # send current signal even if same as last_signal
                 df_1h = fetch_data("1h", 100)
                 df_1d = fetch_data("1day", 50)
                 if df_1h is not None and df_1d is not None:
