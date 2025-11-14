@@ -1,3 +1,4 @@
+# goldStra_railway.py
 import os, time, requests, pandas as pd, numpy as np, feedparser, torch, asyncio
 from telegram import Bot
 from dotenv import load_dotenv
@@ -25,7 +26,7 @@ SLEEP_SECS = 900  # 15 minutes
 bot = Bot(token=TELEGRAM_TOKEN)
 
 # ──────────────────────────────
-# FINBERT SENTIMENT SETUP
+# FINBERT SENTIMENT
 # ──────────────────────────────
 os.environ["HF_HOME"] = "/tmp/.cache"
 os.environ["TRANSFORMERS_CACHE"] = "/tmp/.cache"
@@ -96,7 +97,6 @@ def generate_signal(df_1h, df_1d):
 
     inside_bb1d = last1d["close"] < last1d["bb_upper"] and last1d["close"] > last1d["bb_lower"]
 
-    # RSI FILTER
     if direction == "BUY" and last1h["rsi"] <= 55:
         return None, last1h
     if direction == "SELL" and last1h["rsi"] >= 45:
@@ -148,11 +148,11 @@ def send_alert(msg):
         print(f"⚠️ Telegram send failed: {e}")
 
 # ──────────────────────────────
-# MAIN LOOP
+# MAIN BOT LOOP
 # ──────────────────────────────
 WAT = timezone(timedelta(hours=1))  # UTC+1
 
-def main():
+def bot_loop():
     last_signal = None
     last_forced_alert_date = None
 
@@ -162,7 +162,6 @@ def main():
         df_1h = fetch_data("1h", 100)
         df_1d = fetch_data("1day", 50)
 
-        # Strategy alert
         if df_1h is not None and df_1d is not None:
             signal, last = generate_signal(df_1h, df_1d)
             if signal:
@@ -179,7 +178,6 @@ def main():
                     send_alert(msg)
                     last_signal = signal
 
-        # Forced 1AM WAT alert
         if now_wat.hour == 1 and now_wat.weekday() < 5:
             if last_forced_alert_date != now_wat.date():
                 df_1h = fetch_data("1h", 100)
@@ -201,10 +199,10 @@ def main():
         time.sleep(SLEEP_SECS)
 
 # ──────────────────────────────
-# FLASK WRAPPER
+# FLASK + THREADING
 # ──────────────────────────────
 app = Flask(__name__)
-threading.Thread(target=main, daemon=True).start()
+threading.Thread(target=bot_loop, daemon=True).start()
 
 @app.route("/")
 def health():
