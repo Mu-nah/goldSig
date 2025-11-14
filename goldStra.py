@@ -96,14 +96,11 @@ def generate_signal(df_1h, df_1d):
 
     inside_bb1d = last1d["close"] < last1d["bb_upper"] and last1d["close"] > last1d["bb_lower"]
 
-    # ──────────────────────────────
-    # 🔥 RSI FILTER (BUY > 55, SELL < 45)
-    # ──────────────────────────────
+    # RSI FILTER
     if direction == "BUY" and last1h["rsi"] <= 55:
         return None, last1h
     if direction == "SELL" and last1h["rsi"] >= 45:
         return None, last1h
-    # ──────────────────────────────
 
     if (trend or reversal) and confirm1d and inside_bb1d:
         return direction, last1h
@@ -157,7 +154,7 @@ WAT = timezone(timedelta(hours=1))  # UTC+1
 
 def main():
     last_signal = None
-    last_forced_alert_date = None  # track 1AM alert
+    last_forced_alert_date = None
 
     while True:
         now_wat = datetime.now(WAT)
@@ -165,7 +162,7 @@ def main():
         df_1h = fetch_data("1h", 100)
         df_1d = fetch_data("1day", 50)
 
-        # ────────── Strategy alert ──────────
+        # Strategy alert
         if df_1h is not None and df_1d is not None:
             signal, last = generate_signal(df_1h, df_1d)
             if signal:
@@ -182,7 +179,7 @@ def main():
                     send_alert(msg)
                     last_signal = signal
 
-        # ────────── Forced 1AM WAT alert ──────────
+        # Forced 1AM WAT alert
         if now_wat.hour == 1 and now_wat.weekday() < 5:
             if last_forced_alert_date != now_wat.date():
                 df_1h = fetch_data("1h", 100)
@@ -204,7 +201,7 @@ def main():
         time.sleep(SLEEP_SECS)
 
 # ──────────────────────────────
-# FLASK WRAPPER FOR RAILWAY
+# FLASK WRAPPER
 # ──────────────────────────────
 app = Flask(__name__)
 threading.Thread(target=main, daemon=True).start()
