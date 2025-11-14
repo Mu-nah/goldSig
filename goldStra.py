@@ -2,7 +2,7 @@ import os, time, requests, pandas as pd, numpy as np, feedparser, torch, asyncio
 from telegram import Bot
 from dotenv import load_dotenv
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
-from datetime import datetime, UTC
+from datetime import datetime, timedelta, timezone
 from urllib.parse import quote
 
 # ──────────────────────────────
@@ -123,7 +123,7 @@ def analyze_sentiment_for_gold():
     return pos_pct, neg_pct
 
 # ──────────────────────────────
-# TELEGRAM ALERT (fixed async issue)
+# TELEGRAM ALERT (async-safe)
 # ──────────────────────────────
 def send_alert(msg):
     try:
@@ -138,11 +138,19 @@ def send_alert(msg):
 # ──────────────────────────────
 # MAIN LOOP
 # ──────────────────────────────
+WAT = timezone(timedelta(hours=1))  # UTC+1
+
 def main():
     last_signal = None
+    last_forced_alert_date = None  # track 1AM alert
+
     while True:
+        now_wat = datetime.now(WAT)
+
         df_1h = fetch_data("1h", 100)
         df_1d = fetch_data("1day", 50)
+
+        # ────────── Strategy alert ──────────
         if df_1h is not None and df_1d is not None:
             signal, last = generate_signal(df_1h, df_1d)
             if signal and signal != last_signal:
@@ -157,6 +165,14 @@ def main():
                     )
                     send_alert(msg)
                     last_signal = signal
+
+        # ────────── Forced 1AM WAT alert ──────────
+        if now_wat.hour == 1 and now_wat.weekday() < 5:
+            if last_forced_alert_date != now_wat.date():
+                msg = f"⏰ Gold 1AM WAT Status Alert\nTime: {now_wat}"
+                send_alert(msg)
+                last_forced_alert_date = now_wat.date()
+
         time.sleep(SLEEP_SECS)
 
 if __name__ == "__main__":
