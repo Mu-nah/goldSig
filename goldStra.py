@@ -153,9 +153,11 @@ def main():
         # ────────── Strategy alert ──────────
         if df_1h is not None and df_1d is not None:
             signal, last = generate_signal(df_1h, df_1d)
-            if signal and signal != last_signal:
+            if signal:
                 pos, neg = analyze_sentiment_for_gold()
-                if (signal == "BUY" and pos >= 50) or (signal == "SELL" and neg >= 50):
+                # check duplicates only for normal signals
+                if ((signal != last_signal) and
+                    ((signal == "BUY" and pos >= 50) or (signal == "SELL" and neg >= 50))):
                     msg = (
                         f"📈 Gold Signal Confirmed ({signal})\n"
                         f"Time: {last['datetime']}\n"
@@ -169,9 +171,22 @@ def main():
         # ────────── Forced 1AM WAT alert ──────────
         if now_wat.hour == 1 and now_wat.weekday() < 5:
             if last_forced_alert_date != now_wat.date():
-                msg = f"⏰ Gold 1AM WAT Status Alert\nTime: {now_wat}"
-                send_alert(msg)
-                last_forced_alert_date = now_wat.date()
+                # send current signal even if same as last_signal
+                df_1h = fetch_data("1h", 100)
+                df_1d = fetch_data("1day", 50)
+                if df_1h is not None and df_1d is not None:
+                    signal, last = generate_signal(df_1h, df_1d)
+                    pos, neg = analyze_sentiment_for_gold()
+                    msg = (
+                        f"⏰ Gold 1AM WAT Signal Alert\n"
+                        f"Signal: {signal if signal else 'No clear signal'}\n"
+                        f"Time: {last['datetime']}\n"
+                        f"Close: ${last['close']:.2f}\n"
+                        f"RSI: {last['rsi']:.2f}\n"
+                        f"Sentiment → 🟢 {pos:.1f}% | 🔴 {neg:.1f}%"
+                    )
+                    send_alert(msg)
+                    last_forced_alert_date = now_wat.date()
 
         time.sleep(SLEEP_SECS)
 
