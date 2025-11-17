@@ -10,7 +10,7 @@ from flask import Flask
 # CONFIG
 # ──────────────────────────────
 load_dotenv()
-SYMBOL = "XAU/USD"
+SYMBOLS = ["XAU/USD", "AUD/USD"]
 API_KEYS = os.getenv("TD_API_KEYS", "").split(",")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
@@ -20,6 +20,7 @@ BB_PERIOD = 20
 BB_STDDEV = 2
 MIN_PIP_DISTANCE = 1.0
 SLEEP_SECS = 1200  # 20 minutes
+SENTIMENT_THRESHOLD = 45
 
 # ──────────────────────────────
 # TELEGRAM SETUP
@@ -44,10 +45,10 @@ finbert_model = AutoModelForSequenceClassification.from_pretrained("yiyanghkust/
 # ──────────────────────────────
 # DATA FETCH
 # ──────────────────────────────
-def fetch_data(interval, limit=100):
+def fetch_data(symbol, interval, limit=100):
     base_url = "https://api.twelvedata.com/time_series"
     for key in API_KEYS:
-        url = f"{base_url}?symbol={SYMBOL}&interval={interval}&outputsize={limit}&apikey={key.strip()}"
+        url = f"{base_url}?symbol={symbol}&interval={interval}&outputsize={limit}&apikey={key.strip()}"
         try:
             r = requests.get(url, timeout=15)
             if r.status_code == 200:
@@ -105,9 +106,9 @@ def generate_signal(df_1h, df_1d):
     return None, last1h
 
 # ──────────────────────────────
-# SENTIMENT ANALYSIS
+# SENTIMENT
 # ──────────────────────────────
-def fetch_news(query="gold price", num_articles=10):
+def fetch_news(query="price", num_articles=10):
     rss_url = f"https://news.google.com/rss/search?q={quote(query)}"
     feed = feedparser.parse(rss_url)
     return [entry.title for entry in feed.entries[:num_articles]]
@@ -119,8 +120,8 @@ def finbert_sentiment(text):
     probs = torch.softmax(outputs.logits, dim=1).numpy()[0]
     return dict(zip(labels, probs))
 
-def analyze_sentiment_for_gold():
-    titles = fetch_news("gold market", 15)
+def analyze_sentiment(symbol):
+    titles = fetch_news(f"{symbol} market", 15)
     summary = {"Positive": 0, "Negative": 0, "Neutral": 0}
     for title in titles:
         scores = finbert_sentiment(title)
@@ -138,54 +139,59 @@ def analyze_sentiment_for_gold():
 WAT = timezone(timedelta(hours=1))  # UTC+1
 
 def bot_loop():
-    last_signal = None
-    last_forced_alert_date = None
+    last_signal_sent = {symbol: None for symbol in SYMBOLS}
+    last_1am_sent_date = None
+
     while True:
         now_wat = datetime.now(WAT)
-        df_1h = fetch_data("1h", 100)
-        df_1d = fetch_data("1day", 50)
+        for symbol in SYMBOLS:
+            df_1h = fetch_data(symbol, "1h", 100)
+            df_1d = fetch_data(symbol, "1day", 50)
+            if df_1h is None or df_1d is None:
+                continue
 
-        # Normal signals
-        if df_1h is not None and df_1d is not None:
             signal, last = generate_signal(df_1h, df_1d)
-            if signal and signal != last_signal:
-                pos, neg, neu = analyze_sentiment_for_gold()
-                if (signal == "BUY" and pos >= 55) or (signal == "SELL" and neg >= 55):
+            pos, neg, neu = analyze_sentiment(symbol)
+
+            # Send normal signal alert
+            if signal and signal != last_signal_sent[symbol]:
+                if (signal == "BUY" and pos >= SENTIMENT_THRESHOLD) or (signal == "SELL" and neg >= SENTIMENT_THRESHOLD):
                     msg = (
-                        f"📈 Gold Signal Confirmed ({signal})\n"
+                        f"📈 {symbol} Signal Confirmed ({signal})\n"
                         f"Time: {last['datetime']}\n"
-                        f"Close: ${last['close']:.2f}\n"
+                        f"Close: {last['close']:.4f}\n"
                         f"RSI: {last['rsi']:.2f}\n"
                         f"Sentiment → 🟢 {pos:.1f}% | 🔴 {neg:.1f}% | ⚪ {neu:.1f}%"
                     )
                     send_alert(msg)
-                    last_signal = signal
+                    last_signal_sent[symbol] = signal
 
-        # Forced 1AM WAT alert (weekdays) — only once per day
+        # Send forced 1AM WAT alert once per day
         if now_wat.hour == 1 and now_wat.weekday() < 5:
-            if last_forced_alert_date != now_wat.date():
-                sig_text, rsi_text, close_text = "No clear signal", "N/A", "N/A"
-                if df_1h is not None and df_1d is not None:
-                    signal, last = generate_signal(df_1h, df_1d)
+            if last_1am_sent_date != now_wat.date():
+                for symbol in SYMBOLS:
+                    df_1h = fetch_data(symbol, "1h", 100)
+                    df_1d = fetch_data(symbol, "1day", 50)
+                    signal, last = generate_signal(df_1h, df_1d) if df_1h is not None else (None, None)
+                    pos, neg, neu = analyze_sentiment(symbol)
                     sig_text = signal if signal else "No clear signal"
-                    rsi_text = f"{last['rsi']:.2f}"
-                    close_text = f"${last['close']:.2f}"
-                    pos, neg, neu = analyze_sentiment_for_gold()
-                msg = (
-                    f"⏰ Gold 1AM WAT Status\n"
-                    f"Signal: {sig_text}\n"
-                    f"Close: {close_text}\n"
-                    f"RSI: {rsi_text}\n"
-                    f"Sentiment → 🟢 {pos:.1f}% | 🔴 {neg:.1f}% | ⚪ {neu:.1f}%\n"
-                    f"Time: {now_wat}"
-                )
-                send_alert(msg)
-                last_forced_alert_date = now_wat.date()
+                    rsi_text = f"{last['rsi']:.2f}" if last is not None else "N/A"
+                    close_text = f"{last['close']:.4f}" if last is not None else "N/A"
+                    msg = (
+                        f"⏰ {symbol} 1AM WAT Status\n"
+                        f"Signal: {sig_text}\n"
+                        f"Close: {close_text}\n"
+                        f"RSI: {rsi_text}\n"
+                        f"Sentiment → 🟢 {pos:.1f}% | 🔴 {neg:.1f}% | ⚪ {neu:.1f}%\n"
+                        f"Time: {now_wat}"
+                    )
+                    send_alert(msg)
+                last_1am_sent_date = now_wat.date()
 
         time.sleep(SLEEP_SECS)
 
 # ──────────────────────────────
-# START BOT & TELEGRAM LOOP
+# START TELEGRAM LOOP
 # ──────────────────────────────
 def start_telegram_loop():
     asyncio.set_event_loop(loop)
@@ -201,7 +207,7 @@ app = Flask(__name__)
 
 @app.route("/")
 def health():
-    return "Gold Bot running ✅", 200
+    return "Gold & Forex Bot running ✅", 200
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
