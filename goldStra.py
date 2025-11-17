@@ -1,4 +1,4 @@
-import os, time, requests, pandas as pd, numpy as np, feedparser, torch, asyncio, threading
+import os, time, requests, pandas as pd, numpy as np, feedparser, torch, asyncio, threading 
 from telegram import Bot
 from dotenv import load_dotenv
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
@@ -83,7 +83,7 @@ def bollinger_bands(series, period=20, std_dev=2):
     return upper, sma, lower
 
 # ──────────────────────────────
-# STRATEGY
+# STRATEGY (now returns signal type: Trend / Reversal / None)
 # ──────────────────────────────
 def generate_signal(df_1h, df_1d):
     df_1h["rsi"] = rsi(df_1h["close"], RSI_PERIOD)
@@ -102,8 +102,10 @@ def generate_signal(df_1h, df_1d):
     inside_bb1d = last1d["close"] < last1d["bb_upper"] and last1d["close"] > last1d["bb_lower"]
 
     if (trend or reversal) and confirm1d and inside_bb1d:
-        return direction, last1h
-    return None, last1h
+        sig_type = "Trend" if trend else "Reversal"
+        return direction, last1h, sig_type
+
+    return None, last1h, None
 
 # ──────────────────────────────
 # SENTIMENT ANALYSIS
@@ -151,11 +153,11 @@ def bot_loop():
         df_1d = fetch_data(symbol, "1day", 50)
         if df_1h is None or df_1d is None:
             continue
-        signal, last1h = generate_signal(df_1h, df_1d)
+        signal, last1h, sig_type = generate_signal(df_1h, df_1d)
         pos, neg, neu = analyze_sentiment(symbol)
         msg = (
             f"⚡ {symbol} Startup Status\n"
-            f"Signal: {signal if signal else 'No clear signal'}\n"
+            f"Signal: {signal if signal else 'No clear signal'}" + (f" ({sig_type})" if sig_type else "") + "\n"
             f"Close: {last1h['close']:.4f}\n"
             f"RSI: {last1h['rsi']:.2f}\n"
             f"Sentiment → 🟢 {pos:.1f}% | 🔴 {neg:.1f}% | ⚪ {neu:.1f}%\n"
@@ -173,13 +175,13 @@ def bot_loop():
             df_1d = fetch_data(symbol, "1day", 50)
             if df_1h is None or df_1d is None:
                 continue
-            signal, last1h = generate_signal(df_1h, df_1d)
+            signal, last1h, sig_type = generate_signal(df_1h, df_1d)
             pos, neg, neu = analyze_sentiment(symbol)
             if signal and signal != last_signal_dict[symbol]:
                 if (signal == "BUY" and pos >= SENTIMENT_BENCH) or \
                    (signal == "SELL" and neg >= SENTIMENT_BENCH):
                     msg = (
-                        f"📈 {symbol} Signal Confirmed ({signal})\n"
+                        f"📈 {symbol} Signal Confirmed ({signal})" + (f" [{sig_type}]" if sig_type else "") + "\n"
                         f"Time: {last1h['datetime']}\n"
                         f"Close: {last1h['close']:.4f}\n"
                         f"RSI: {last1h['rsi']:.2f}\n"
@@ -195,11 +197,11 @@ def bot_loop():
                 df_1d = fetch_data(symbol, "1day", 50)
                 if df_1h is None or df_1d is None:
                     continue
-                signal, last1h = generate_signal(df_1h, df_1d)
+                signal, last1h, sig_type = generate_signal(df_1h, df_1d)
                 pos, neg, neu = analyze_sentiment(symbol)
                 msg = (
                     f"⏰ {symbol} 1AM WAT Status\n"
-                    f"Signal: {signal if signal else 'No clear signal'}\n"
+                    f"Signal: {signal if signal else 'No clear signal'}" + (f" ({sig_type})" if sig_type else "") + "\n"
                     f"Close: {last1h['close']:.4f}\n"
                     f"RSI: {last1h['rsi']:.2f}\n"
                     f"Sentiment → 🟢 {pos:.1f}% | 🔴 {neg:.1f}% | ⚪ {neu:.1f}%\n"
