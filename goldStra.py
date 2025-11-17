@@ -1,52 +1,48 @@
-import os
-import time
-import requests
-import pandas as pd
-import numpy as np
-import feedparser
-import torch
-import asyncio
+import os, time, requests, pandas as pd, numpy as np, feedparser, torch, asyncio
 from telegram import Bot
 from dotenv import load_dotenv
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
 from datetime import datetime, timedelta, timezone
 from urllib.parse import quote
+from flask import Flask
+import threading
 
 # ──────────────────────────────
-# CONFIG
+# ⚙️ CONFIG
 # ──────────────────────────────
 load_dotenv()
-
 SYMBOL = "XAU/USD"
 API_KEYS = os.getenv("TD_API_KEYS", "").split(",")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+
 RSI_PERIOD = 14
 BB_PERIOD = 20
 BB_STDDEV = 2
 MIN_PIP_DISTANCE = 1.0
-SLEEP_SECS = 900  # 15 minutes
+SLEEP_SECS = 1200  # 20 minutes
 
 bot = Bot(token=TELEGRAM_TOKEN)
 
 # ──────────────────────────────
-# FINBERT SENTIMENT SETUP
+# 🧠 FINBERT SENTIMENT
 # ──────────────────────────────
 os.environ["HF_HOME"] = "/tmp/.cache"
 os.environ["TRANSFORMERS_CACHE"] = "/tmp/.cache"
-
 labels = ["Positive", "Negative", "Neutral"]
+
 finbert_tokenizer = AutoTokenizer.from_pretrained("yiyanghkust/finbert-tone")
 finbert_model = AutoModelForSequenceClassification.from_pretrained("yiyanghkust/finbert-tone")
 
 # ──────────────────────────────
-# DATA FETCH
+# 🔄 DATA FETCH
 # ──────────────────────────────
 def fetch_data(interval, limit=100):
     base_url = "https://api.twelvedata.com/time_series"
     for key in API_KEYS:
         url = f"{base_url}?symbol={SYMBOL}&interval={interval}&outputsize={limit}&apikey={key.strip()}"
         try:
+            print(f"📡 Fetching {interval} candles using key {key[:6]}...")
             r = requests.get(url, timeout=15)
             if r.status_code == 200:
                 data = r.json()
@@ -56,46 +52,58 @@ def fetch_data(interval, limit=100):
                     df = df.sort_values("datetime")
                     df = df.astype({"open": float, "high": float, "low": float, "close": float})
                     return df
+            print(f"⚠️ Key {key[:6]} failed: {r.text[:80]}")
         except Exception as e:
-            continue
+            print(f"❌ Error using key {key[:6]} -> {e}")
+    print("🚫 All TwelveData keys failed.")
     return None
 
 # ──────────────────────────────
-# INDICATORS
+# 📊 INDICATORS
 # ──────────────────────────────
-def compute_rsi(series, period=RSI_PERIOD):
+def rsi(series, period=14):
     delta = series.diff()
-    gain = delta.where(delta > 0, 0).rolling(period).mean()
-    loss = -delta.where(delta < 0, 0).rolling(period).mean()
-    rs = gain / loss
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.rolling(period, min_periods=period).mean()
+    avg_loss = loss.rolling(period, min_periods=period).mean()
+    rs = avg_gain / avg_loss
     return 100 - (100 / (1 + rs))
 
-def compute_bb(series, period=BB_PERIOD, stddev=BB_STDDEV):
-    ma = series.rolling(period).mean()
+def bollinger_bands(series, period=20, std_dev=2):
+    sma = series.rolling(period).mean()
     std = series.rolling(period).std()
-    upper = ma + (stddev * std)
-    lower = ma - (stddev * std)
-    return ma, upper, lower
+    upper = sma + std_dev * std
+    lower = sma - std_dev * std
+    return upper, sma, lower
 
+# ──────────────────────────────
+# 📊 STRATEGY
+# ──────────────────────────────
 def generate_signal(df_1h, df_1d):
-    df_1h["rsi"] = compute_rsi(df_1h["close"])
-    ma, upper, lower = compute_bb(df_1h["close"])
-    df_1h["bb_upper"] = upper
-    df_1h["bb_lower"] = lower
+    df_1h["rsi"] = rsi(df_1h["close"], RSI_PERIOD)
+    df_1h["bb_upper"], df_1h["bb_mid"], df_1h["bb_lower"] = bollinger_bands(df_1h["close"], BB_PERIOD, BB_STDDEV)
+    df_1d["bb_upper"], _, df_1d["bb_lower"] = bollinger_bands(df_1d["close"], BB_PERIOD, BB_STDDEV)
 
-    latest = df_1h.iloc[-1]
-    prev = df_1h.iloc[-2]
+    last1h, last1d = df_1h.iloc[-1], df_1d.iloc[-1]
+    direction = "BUY" if last1h["close"] > last1h["open"] else "SELL"
 
-    if prev["close"] < prev["bb_lower"] and latest["close"] > latest["bb_lower"] and latest["rsi"] < 30:
-        return "BUY", latest
-    elif prev["close"] > prev["bb_upper"] and latest["close"] < latest["bb_upper"] and latest["rsi"] > 70:
-        return "SELL", latest
-    return None, None
+    trend = (direction == "BUY" and last1h["close"] > last1h["bb_mid"] + MIN_PIP_DISTANCE) or \
+            (direction == "SELL" and last1h["close"] < last1h["bb_mid"] - MIN_PIP_DISTANCE)
+    reversal = (direction == "BUY" and last1h["close"] < last1h["bb_mid"]) or \
+               (direction == "SELL" and last1h["close"] > last1h["bb_mid"])
+    confirm1d = (direction == "BUY" and last1d["close"] > last1d["open"]) or \
+                (direction == "SELL" and last1d["close"] < last1d["open"])
+    inside_bb1d = last1d["close"] < last1d["bb_upper"] and last1d["close"] > last1d["bb_lower"]
+
+    if (trend or reversal) and confirm1d and inside_bb1d:
+        return direction, last1h
+    return None, last1h
 
 # ──────────────────────────────
-# NEWS SENTIMENT
+# 🧠 SENTIMENT ANALYSIS
 # ──────────────────────────────
-def fetch_news(query, num_articles=10):
+def fetch_news(query="gold price", num_articles=10):
     rss_url = f"https://news.google.com/rss/search?q={quote(query)}"
     feed = feedparser.parse(rss_url)
     return [entry.title for entry in feed.entries[:num_articles]]
@@ -115,57 +123,87 @@ def analyze_sentiment_for_gold():
         dominant = max(scores, key=scores.get)
         summary[dominant] += 1
     total = sum(summary.values())
-    pos_pct = (summary["Positive"] / total) * 100 if total else 0
-    neg_pct = (summary["Negative"] / total) * 100 if total else 0
+    pos_pct = (summary["Positive"]/total)*100 if total else 0
+    neg_pct = (summary["Negative"]/total)*100 if total else 0
     return pos_pct, neg_pct
 
 # ──────────────────────────────
-# TELEGRAM ALERT
+# 📬 TELEGRAM ALERT
 # ──────────────────────────────
 def send_alert(msg):
     try:
-        bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=msg)
+        asyncio.run(bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=msg))
+        print(f"✅ Alert sent: {msg}")
     except Exception as e:
-        print(f"Failed to send alert: {e}")
+        print(f"⚠️ Telegram send failed: {e}")
 
 # ──────────────────────────────
-# MAIN LOOP
+# 🚀 BOT LOOP
 # ──────────────────────────────
 WAT = timezone(timedelta(hours=1))  # UTC+1
 
-def main():
+def bot_loop():
+    print("🤖 Bot loop started...")
     last_signal = None
-    last_forced_alert_date = None  # Track 1AM alert
-
     while True:
-        now_wat = datetime.now(WAT)
-        df_1h = fetch_data("1h", 100)
-        df_1d = fetch_data("1day", 50)
+        try:
+            now_wat = datetime.now(WAT)
+            df_1h = fetch_data("1h", 100)
+            df_1d = fetch_data("1day", 50)
 
-        # ────────── Strategy alert ──────────
-        if df_1h is not None and df_1d is not None:
-            signal, last = generate_signal(df_1h, df_1d)
-            if signal and signal != last_signal:
-                pos, neg = analyze_sentiment_for_gold()
-                if (signal == "BUY" and pos >= 50) or (signal == "SELL" and neg >= 50):
-                    msg = (
-                        f"📈 Gold Signal Confirmed ({signal})\n"
-                        f"Time: {last['datetime']}\n"
-                        f"Close: ${last['close']:.2f}\n"
-                        f"RSI: {last['rsi']:.2f}\n"
-                        f"Sentiment → 🟢 {pos:.1f}% | 🔴 {neg:.1f}%"
-                    )
-                    send_alert(msg)
-                    last_signal = signal
+            # Normal strategy alerts
+            if df_1h is not None and df_1d is not None:
+                signal, last = generate_signal(df_1h, df_1d)
+                if signal and signal != last_signal:
+                    pos, neg = analyze_sentiment_for_gold()
+                    print(f"🧠 Sentiment → Pos: {pos:.1f}% | Neg: {neg:.1f}%")
+                    if (signal == "BUY" and pos >= 30) or (signal == "SELL" and neg >= 30):
+                        msg = (
+                            f"📈 Gold Signal Confirmed ({signal})\n"
+                            f"Time: {last['datetime']}\n"
+                            f"Close: ${last['close']:.2f}\n"
+                            f"RSI: {last['rsi']:.2f}\n"
+                            f"Sentiment → 🟢 {pos:.1f}% | 🔴 {neg:.1f}%"
+                        )
+                        send_alert(msg)
+                        last_signal = signal
 
-        # ────────── Forced 1AM WAT alert ──────────
-        if now_wat.hour == 1 and now_wat.weekday() < 5:
-            if last_forced_alert_date != now_wat.date():
-                msg = f"⏰ Gold 1AM WAT Status Alert\nTime: {now_wat}"
+            # Forced 1AM WAT alert (weekdays) — always send
+            if now_wat.hour == 1 and now_wat.weekday() < 5:
+                sig_text = "No data"
+                rsi_text = "N/A"
+                close_text = "N/A"
+                if df_1h is not None and df_1d is not None:
+                    signal, last = generate_signal(df_1h, df_1d)
+                    sig_text = signal if signal else "No clear signal"
+                    rsi_text = f"{last['rsi']:.2f}"
+                    close_text = f"${last['close']:.2f}"
+                msg = (
+                    f"⏰ Gold 1AM WAT Status\n"
+                    f"Signal: {sig_text}\n"
+                    f"Close: {close_text}\n"
+                    f"RSI: {rsi_text}\n"
+                    f"Time: {now_wat}"
+                )
                 send_alert(msg)
-                last_forced_alert_date = now_wat.date()
+                print("📨 Forced 1AM alert sent.")
 
-        time.sleep(SLEEP_SECS)
+            time.sleep(SLEEP_SECS)
+
+        except Exception as e:
+            print(f"💥 Bot loop crashed: {e}")
+            time.sleep(60)
+
+# ──────────────────────────────
+# FLASK FOR RAILWAY HEALTHCHECK
+# ──────────────────────────────
+app = Flask(__name__)
+threading.Thread(target=bot_loop, daemon=True).start()
+
+@app.route("/")
+def health():
+    return "Gold Bot running ✅", 200
 
 if __name__ == "__main__":
-    main()
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host="0.0.0.0", port=port)
