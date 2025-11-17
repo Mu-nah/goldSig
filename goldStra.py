@@ -25,7 +25,7 @@ SLEEP_SECS = 1200  # 20 minutes
 bot = Bot(token=TELEGRAM_TOKEN)
 
 # ──────────────────────────────
-# FINBERT
+# FINBERT SENTIMENT
 # ──────────────────────────────
 os.environ["HF_HOME"] = "/tmp/.cache"
 os.environ["TRANSFORMERS_CACHE"] = "/tmp/.cache"
@@ -98,7 +98,7 @@ def generate_signal(df_1h, df_1d):
     return None, last1h
 
 # ──────────────────────────────
-# SENTIMENT
+# SENTIMENT ANALYSIS
 # ──────────────────────────────
 def fetch_news(query="gold price", num_articles=10):
     rss_url = f"https://news.google.com/rss/search?q={quote(query)}"
@@ -122,7 +122,8 @@ def analyze_sentiment_for_gold():
     total = sum(summary.values())
     pos_pct = (summary["Positive"]/total)*100 if total else 0
     neg_pct = (summary["Negative"]/total)*100 if total else 0
-    return pos_pct, neg_pct
+    neu_pct = (summary["Neutral"]/total)*100 if total else 0
+    return pos_pct, neg_pct, neu_pct
 
 # ──────────────────────────────
 # TELEGRAM ALERT
@@ -130,9 +131,8 @@ def analyze_sentiment_for_gold():
 def send_alert(msg):
     try:
         asyncio.run(bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=msg))
-        print(f"✅ Alert sent")
-    except Exception as e:
-        print(f"⚠️ Telegram send failed: {e}")
+    except:
+        pass
 
 # ──────────────────────────────
 # BOT LOOP
@@ -140,59 +140,48 @@ def send_alert(msg):
 WAT = timezone(timedelta(hours=1))  # UTC+1
 
 def bot_loop():
-    print("🤖 Bot loop started...")
     last_signal = None
-    last_1am_date = None  # track date to avoid multiple 1AM alerts in same day
-
     while True:
-        try:
-            now_wat = datetime.now(WAT)
-            df_1h = fetch_data("1h", 100)
-            df_1d = fetch_data("1day", 50)
+        now_wat = datetime.now(WAT)
+        df_1h = fetch_data("1h", 100)
+        df_1d = fetch_data("1day", 50)
 
-            # Normal strategy alerts (no duplicates)
-            if df_1h is not None and df_1d is not None:
-                signal, last = generate_signal(df_1h, df_1d)
-                if signal and signal != last_signal:
-                    pos, neg = analyze_sentiment_for_gold()
-                    if (signal == "BUY" and pos >= 30) or (signal == "SELL" and neg >= 30):
-                        msg = (
-                            f"📈 Gold Signal Confirmed ({signal})\n"
-                            f"Time: {last['datetime']}\n"
-                            f"Close: ${last['close']:.2f}\n"
-                            f"RSI: {last['rsi']:.2f}\n"
-                            f"Sentiment → 🟢 {pos:.1f}% | 🔴 {neg:.1f}%"
-                        )
-                        send_alert(msg)
-                        last_signal = signal
-
-            # Forced 1AM WAT alert (weekdays) — only once per day
-            if now_wat.hour == 1 and now_wat.weekday() < 5:
-                if last_1am_date != now_wat.date():
-                    sig_text = "No data"
-                    rsi_text = "N/A"
-                    close_text = "N/A"
-                    if df_1h is not None and df_1d is not None:
-                        signal, last = generate_signal(df_1h, df_1d)
-                        sig_text = signal if signal else "No clear signal"
-                        rsi_text = f"{last['rsi']:.2f}"
-                        close_text = f"${last['close']:.2f}"
+        # Normal signals
+        if df_1h is not None and df_1d is not None:
+            signal, last = generate_signal(df_1h, df_1d)
+            if signal and signal != last_signal:
+                pos, neg, neu = analyze_sentiment_for_gold()
+                if (signal == "BUY" and pos >= 30) or (signal == "SELL" and neg >= 30):
                     msg = (
-                        f"⏰ Gold 1AM WAT Status\n"
-                        f"Signal: {sig_text}\n"
-                        f"Close: {close_text}\n"
-                        f"RSI: {rsi_text}\n"
-                        f"Time: {now_wat}"
+                        f"📈 Gold Signal Confirmed ({signal})\n"
+                        f"Time: {last['datetime']}\n"
+                        f"Close: ${last['close']:.2f}\n"
+                        f"RSI: {last['rsi']:.2f}\n"
+                        f"Sentiment → 🟢 {pos:.1f}% | 🔴 {neg:.1f}% | ⚪ {neu:.1f}%"
                     )
                     send_alert(msg)
-                    last_1am_date = now_wat.date()
-                    print("📨 Forced 1AM alert sent.")
+                    last_signal = signal
 
-            time.sleep(60)
+        # Forced 1AM WAT alert (weekdays) — always send
+        if now_wat.hour == 1 and now_wat.weekday() < 5:
+            sig_text, rsi_text, close_text = "No clear signal", "N/A", "N/A"
+            if df_1h is not None and df_1d is not None:
+                signal, last = generate_signal(df_1h, df_1d)
+                sig_text = signal if signal else "No clear signal"
+                rsi_text = f"{last['rsi']:.2f}"
+                close_text = f"${last['close']:.2f}"
+                pos, neg, neu = analyze_sentiment_for_gold()
+            msg = (
+                f"⏰ Gold 1AM WAT Status\n"
+                f"Signal: {sig_text}\n"
+                f"Close: {close_text}\n"
+                f"RSI: {rsi_text}\n"
+                f"Sentiment → 🟢 {pos:.1f}% | 🔴 {neg:.1f}% | ⚪ {neu:.1f}%\n"
+                f"Time: {now_wat}"
+            )
+            send_alert(msg)
 
-        except Exception as e:
-            print(f"💥 Bot loop crashed: {e}")
-            time.sleep(60)
+        time.sleep(1200)  # 20 minutes
 
 # ──────────────────────────────
 # FLASK HEALTHCHECK
