@@ -1,27 +1,22 @@
 # Use official Python image
-FROM python:3.10-slim
+FROM python:3.11-slim
 
-# Set environment variables
-ENV PYTHONUNBUFFERED=1
-ENV HF_HOME=/tmp/.cache
-ENV TRANSFORMERS_CACHE=/tmp/.cache
-
-# Install system dependencies
-RUN apt-get update && apt-get install -y \
-    gcc \
-    && rm -rf /var/lib/apt/lists/*
-
-# Create app directory
+# Set working directory
 WORKDIR /app
 
-# Copy requirements file (create this separately)
+# Copy requirements and install
 COPY requirements.txt .
-
-# Install Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy bot source code into the image
+# Copy bot code
 COPY . .
 
-# Set an entrypoint to run the bot
+# Set environment variables (if needed, or use Railway/Render env)
+# ENV TELEGRAM_BOT_TOKEN=...
+# ENV TELEGRAM_CHAT_ID=...
+
+# Expose port for Flask health check
+EXPOSE 8080
+
+# Start the bot
 CMD ["python", "goldStra.py"]
