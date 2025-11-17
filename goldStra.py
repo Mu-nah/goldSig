@@ -1,11 +1,10 @@
-import os, time, requests, pandas as pd, numpy as np, feedparser, torch, asyncio
+import os, time, requests, pandas as pd, numpy as np, feedparser, torch, asyncio, threading
 from telegram import Bot
 from dotenv import load_dotenv
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
 from datetime import datetime, timedelta, timezone
 from urllib.parse import quote
 from flask import Flask
-import threading
 
 # ──────────────────────────────
 # CONFIG
@@ -22,7 +21,15 @@ BB_STDDEV = 2
 MIN_PIP_DISTANCE = 1.0
 SLEEP_SECS = 1200  # 20 minutes
 
+# ──────────────────────────────
+# TELEGRAM SETUP
+# ──────────────────────────────
 bot = Bot(token=TELEGRAM_TOKEN)
+loop = asyncio.new_event_loop()
+
+def send_alert(msg):
+    """Send message using background event loop"""
+    asyncio.run_coroutine_threadsafe(bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=msg), loop)
 
 # ──────────────────────────────
 # FINBERT SENTIMENT
@@ -126,21 +133,13 @@ def analyze_sentiment_for_gold():
     return pos_pct, neg_pct, neu_pct
 
 # ──────────────────────────────
-# TELEGRAM ALERT
-# ──────────────────────────────
-def send_alert(msg):
-    try:
-        asyncio.run(bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=msg))
-    except:
-        pass
-
-# ──────────────────────────────
 # BOT LOOP
 # ──────────────────────────────
 WAT = timezone(timedelta(hours=1))  # UTC+1
 
 def bot_loop():
     last_signal = None
+    last_forced_alert_date = None
     while True:
         now_wat = datetime.now(WAT)
         df_1h = fetch_data("1h", 100)
@@ -162,32 +161,43 @@ def bot_loop():
                     send_alert(msg)
                     last_signal = signal
 
-        # Forced 1AM WAT alert (weekdays) — always send
+        # Forced 1AM WAT alert (weekdays) — only once per day
         if now_wat.hour == 1 and now_wat.weekday() < 5:
-            sig_text, rsi_text, close_text = "No clear signal", "N/A", "N/A"
-            if df_1h is not None and df_1d is not None:
-                signal, last = generate_signal(df_1h, df_1d)
-                sig_text = signal if signal else "No clear signal"
-                rsi_text = f"{last['rsi']:.2f}"
-                close_text = f"${last['close']:.2f}"
-                pos, neg, neu = analyze_sentiment_for_gold()
-            msg = (
-                f"⏰ Gold 1AM WAT Status\n"
-                f"Signal: {sig_text}\n"
-                f"Close: {close_text}\n"
-                f"RSI: {rsi_text}\n"
-                f"Sentiment → 🟢 {pos:.1f}% | 🔴 {neg:.1f}% | ⚪ {neu:.1f}%\n"
-                f"Time: {now_wat}"
-            )
-            send_alert(msg)
+            if last_forced_alert_date != now_wat.date():
+                sig_text, rsi_text, close_text = "No clear signal", "N/A", "N/A"
+                if df_1h is not None and df_1d is not None:
+                    signal, last = generate_signal(df_1h, df_1d)
+                    sig_text = signal if signal else "No clear signal"
+                    rsi_text = f"{last['rsi']:.2f}"
+                    close_text = f"${last['close']:.2f}"
+                    pos, neg, neu = analyze_sentiment_for_gold()
+                msg = (
+                    f"⏰ Gold 1AM WAT Status\n"
+                    f"Signal: {sig_text}\n"
+                    f"Close: {close_text}\n"
+                    f"RSI: {rsi_text}\n"
+                    f"Sentiment → 🟢 {pos:.1f}% | 🔴 {neg:.1f}% | ⚪ {neu:.1f}%\n"
+                    f"Time: {now_wat}"
+                )
+                send_alert(msg)
+                last_forced_alert_date = now_wat.date()
 
-        time.sleep(1200)  # 20 minutes
+        time.sleep(SLEEP_SECS)
+
+# ──────────────────────────────
+# START BOT & TELEGRAM LOOP
+# ──────────────────────────────
+def start_telegram_loop():
+    asyncio.set_event_loop(loop)
+    loop.run_forever()
+
+threading.Thread(target=start_telegram_loop, daemon=True).start()
+threading.Thread(target=bot_loop, daemon=True).start()
 
 # ──────────────────────────────
 # FLASK HEALTHCHECK
 # ──────────────────────────────
 app = Flask(__name__)
-threading.Thread(target=bot_loop, daemon=True).start()
 
 @app.route("/")
 def health():
