@@ -8,7 +8,7 @@ from flask import Flask
 import threading
 
 # ──────────────────────────────
-# ⚙️ CONFIG
+# CONFIG
 # ──────────────────────────────
 load_dotenv()
 SYMBOL = "XAU/USD"
@@ -25,7 +25,7 @@ SLEEP_SECS = 1200  # 20 minutes
 bot = Bot(token=TELEGRAM_TOKEN)
 
 # ──────────────────────────────
-# 🧠 FINBERT SENTIMENT
+# FINBERT
 # ──────────────────────────────
 os.environ["HF_HOME"] = "/tmp/.cache"
 os.environ["TRANSFORMERS_CACHE"] = "/tmp/.cache"
@@ -35,14 +35,13 @@ finbert_tokenizer = AutoTokenizer.from_pretrained("yiyanghkust/finbert-tone")
 finbert_model = AutoModelForSequenceClassification.from_pretrained("yiyanghkust/finbert-tone")
 
 # ──────────────────────────────
-# 🔄 DATA FETCH
+# DATA FETCH
 # ──────────────────────────────
 def fetch_data(interval, limit=100):
     base_url = "https://api.twelvedata.com/time_series"
     for key in API_KEYS:
         url = f"{base_url}?symbol={SYMBOL}&interval={interval}&outputsize={limit}&apikey={key.strip()}"
         try:
-            print(f"📡 Fetching {interval} candles using key {key[:6]}...")
             r = requests.get(url, timeout=15)
             if r.status_code == 200:
                 data = r.json()
@@ -52,14 +51,12 @@ def fetch_data(interval, limit=100):
                     df = df.sort_values("datetime")
                     df = df.astype({"open": float, "high": float, "low": float, "close": float})
                     return df
-            print(f"⚠️ Key {key[:6]} failed: {r.text[:80]}")
-        except Exception as e:
-            print(f"❌ Error using key {key[:6]} -> {e}")
-    print("🚫 All TwelveData keys failed.")
+        except:
+            continue
     return None
 
 # ──────────────────────────────
-# 📊 INDICATORS
+# INDICATORS
 # ──────────────────────────────
 def rsi(series, period=14):
     delta = series.diff()
@@ -78,7 +75,7 @@ def bollinger_bands(series, period=20, std_dev=2):
     return upper, sma, lower
 
 # ──────────────────────────────
-# 📊 STRATEGY
+# STRATEGY
 # ──────────────────────────────
 def generate_signal(df_1h, df_1d):
     df_1h["rsi"] = rsi(df_1h["close"], RSI_PERIOD)
@@ -101,7 +98,7 @@ def generate_signal(df_1h, df_1d):
     return None, last1h
 
 # ──────────────────────────────
-# 🧠 SENTIMENT ANALYSIS
+# SENTIMENT
 # ──────────────────────────────
 def fetch_news(query="gold price", num_articles=10):
     rss_url = f"https://news.google.com/rss/search?q={quote(query)}"
@@ -128,35 +125,36 @@ def analyze_sentiment_for_gold():
     return pos_pct, neg_pct
 
 # ──────────────────────────────
-# 📬 TELEGRAM ALERT
+# TELEGRAM ALERT
 # ──────────────────────────────
 def send_alert(msg):
     try:
         asyncio.run(bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=msg))
-        print(f"✅ Alert sent: {msg}")
+        print(f"✅ Alert sent")
     except Exception as e:
         print(f"⚠️ Telegram send failed: {e}")
 
 # ──────────────────────────────
-# 🚀 BOT LOOP
+# BOT LOOP
 # ──────────────────────────────
 WAT = timezone(timedelta(hours=1))  # UTC+1
 
 def bot_loop():
     print("🤖 Bot loop started...")
     last_signal = None
+    last_1am_date = None  # track date to avoid multiple 1AM alerts in same day
+
     while True:
         try:
             now_wat = datetime.now(WAT)
             df_1h = fetch_data("1h", 100)
             df_1d = fetch_data("1day", 50)
 
-            # Normal strategy alerts
+            # Normal strategy alerts (no duplicates)
             if df_1h is not None and df_1d is not None:
                 signal, last = generate_signal(df_1h, df_1d)
                 if signal and signal != last_signal:
                     pos, neg = analyze_sentiment_for_gold()
-                    print(f"🧠 Sentiment → Pos: {pos:.1f}% | Neg: {neg:.1f}%")
                     if (signal == "BUY" and pos >= 30) or (signal == "SELL" and neg >= 30):
                         msg = (
                             f"📈 Gold Signal Confirmed ({signal})\n"
@@ -168,34 +166,36 @@ def bot_loop():
                         send_alert(msg)
                         last_signal = signal
 
-            # Forced 1AM WAT alert (weekdays) — always send
+            # Forced 1AM WAT alert (weekdays) — only once per day
             if now_wat.hour == 1 and now_wat.weekday() < 5:
-                sig_text = "No data"
-                rsi_text = "N/A"
-                close_text = "N/A"
-                if df_1h is not None and df_1d is not None:
-                    signal, last = generate_signal(df_1h, df_1d)
-                    sig_text = signal if signal else "No clear signal"
-                    rsi_text = f"{last['rsi']:.2f}"
-                    close_text = f"${last['close']:.2f}"
-                msg = (
-                    f"⏰ Gold 1AM WAT Status\n"
-                    f"Signal: {sig_text}\n"
-                    f"Close: {close_text}\n"
-                    f"RSI: {rsi_text}\n"
-                    f"Time: {now_wat}"
-                )
-                send_alert(msg)
-                print("📨 Forced 1AM alert sent.")
+                if last_1am_date != now_wat.date():
+                    sig_text = "No data"
+                    rsi_text = "N/A"
+                    close_text = "N/A"
+                    if df_1h is not None and df_1d is not None:
+                        signal, last = generate_signal(df_1h, df_1d)
+                        sig_text = signal if signal else "No clear signal"
+                        rsi_text = f"{last['rsi']:.2f}"
+                        close_text = f"${last['close']:.2f}"
+                    msg = (
+                        f"⏰ Gold 1AM WAT Status\n"
+                        f"Signal: {sig_text}\n"
+                        f"Close: {close_text}\n"
+                        f"RSI: {rsi_text}\n"
+                        f"Time: {now_wat}"
+                    )
+                    send_alert(msg)
+                    last_1am_date = now_wat.date()
+                    print("📨 Forced 1AM alert sent.")
 
-            time.sleep(SLEEP_SECS)
+            time.sleep(60)
 
         except Exception as e:
             print(f"💥 Bot loop crashed: {e}")
             time.sleep(60)
 
 # ──────────────────────────────
-# FLASK FOR RAILWAY HEALTHCHECK
+# FLASK HEALTHCHECK
 # ──────────────────────────────
 app = Flask(__name__)
 threading.Thread(target=bot_loop, daemon=True).start()
