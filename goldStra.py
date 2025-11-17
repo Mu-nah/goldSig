@@ -150,7 +150,7 @@ def bot_loop():
             signal, last = generate_signal(df_1h, df_1d)
             if signal and signal != last_signal:
                 pos, neg, neu = analyze_sentiment_for_gold()
-                if (signal == "BUY" and pos >= 30) or (signal == "SELL" and neg >= 30):
+                if (signal == "BUY" and pos >= 55) or (signal == "SELL" and neg >= 55):
                     msg = (
                         f"📈 Gold Signal Confirmed ({signal})\n"
                         f"Time: {last['datetime']}\n"
