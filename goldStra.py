@@ -55,9 +55,14 @@ def fetch_data(symbol, interval, limit=100):
                 data = r.json()
                 if "values" in data:
                     df = pd.DataFrame(data["values"])
-                    df["datetime"] = pd.to_datetime(df["datetime"])
+                    df["datetime"] = pd.to_datetime(df["datetime"], utc=True)
                     df = df.sort_values("datetime")
                     df = df.astype({"open": float, "high": float, "low": float, "close": float})
+                    
+                    # Filter daily candles to start at 00:00 UTC (1AM WAT)
+                    if interval == "1day":
+                        df = df[df["datetime"].dt.time == datetime.min.time()]
+                    
                     return df
         except:
             continue
@@ -140,7 +145,7 @@ def analyze_sentiment(symbol):
 # BOT LOOP
 # ──────────────────────────────
 WAT = timezone(timedelta(hours=1))  # UTC+1
-last_sent_date = None  # FIX: ensure 1AM status isn't blocked on startup
+last_sent_date = None
 last_signal_dict = {symbol: None for symbol in SYMBOLS}
 
 def bot_loop():
@@ -228,7 +233,7 @@ app = Flask(__name__)
 
 @app.route("/")
 def health():
-    return "Trading Bot running ✅", 200
+    return "Trading Bot running ⭐", 200
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
