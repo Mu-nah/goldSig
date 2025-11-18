@@ -83,7 +83,7 @@ def bollinger_bands(series, period=20, std_dev=2):
     return upper, sma, lower
 
 # ──────────────────────────────
-# STRATEGY (now returns signal type: Trend / Reversal / None)
+# STRATEGY
 # ──────────────────────────────
 def generate_signal(df_1h, df_1d):
     df_1h["rsi"] = rsi(df_1h["close"], RSI_PERIOD)
@@ -140,7 +140,7 @@ def analyze_sentiment(symbol):
 # BOT LOOP
 # ──────────────────────────────
 WAT = timezone(timedelta(hours=1))  # UTC+1
-last_sent_date = None
+last_sent_date = None  # FIX: ensure 1AM status isn't blocked on startup
 last_signal_dict = {symbol: None for symbol in SYMBOLS}
 
 def bot_loop():
@@ -164,7 +164,6 @@ def bot_loop():
             f"Time: {now_wat}"
         )
         send_alert(msg)
-    last_sent_date = now_wat.date()
 
     while True:
         now_wat = datetime.now(WAT)
@@ -191,7 +190,7 @@ def bot_loop():
                     last_signal_dict[symbol] = signal
 
         # Forced 1AM WAT alert (weekdays, once per day)
-        if now_wat.weekday() < 5 and last_sent_date != now_wat.date() and 1 <= now_wat.hour < 2:
+        if now_wat.weekday() < 5 and 1 <= now_wat.hour < 2 and last_sent_date != now_wat.date():
             for symbol in SYMBOLS:
                 df_1h = fetch_data(symbol, "1h", 100)
                 df_1d = fetch_data(symbol, "1day", 50)
