@@ -10,7 +10,7 @@ from flask import Flask
 # CONFIG
 # ──────────────────────────────
 load_dotenv()
-SYMBOLS = ["XAU/USD", "AUD/USD"]
+SYMBOLS = ["XAU/USD"]
 API_KEYS = os.getenv("TD_API_KEYS", "").split(",")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
